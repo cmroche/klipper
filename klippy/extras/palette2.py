@@ -16,9 +16,19 @@ except ImportError:
     from Queue import Queue, Empty
 
 COMMAND_HEARTBEAT = "O99"
+COMMAND_CUT = "O10 D5"
+COMMAND_CLEAR = [
+        "O10 D5",
+        "O10 D0 D0 D0 DFFE1",
+        "O10 D1 D0 D0 DFFE1",
+        "O10 D2 D0 D0 DFFE1",
+        "O10 D3 D0 D0 DFFE1",
+        "O10 D4 D0 D0 D0069"]
 
 HEARTBEAT_SEND = 5
 HEARTBEAT_TIMEOUT = 11
+
+INFO_NOT_CONNECTED = "Palette 2 is not connected, connect first"
 
 class Palette2:
     def __init__(self, config):
@@ -28,6 +38,10 @@ class Palette2:
             "PALETTE_CONNECT", self.cmd_Connect, desc=self.cmd_Connect_Help)
         self.gcode.register_command(
             "PALETTE_DISCONNECT", self.cmd_Disconnect, desc=self.cmd_Disconnect_Help)
+        self.gcode.register_command(
+            "PALETTE_CLEAR", self.cmd_Clear, desc=self.cmd_Clear_Help)
+        self.gcode.register_command(
+            "PALETTE_CUT", self.cmd_Cut, desc=self.cmd_Cut_Help)
         self.serial = None
         self.serial_port = config.get("serial")
         if not self.serial_port:
@@ -42,7 +56,7 @@ class Palette2:
     cmd_Connect_Help = ("Connect to the Palette 2")
     def cmd_Connect(self, gcmd):
         if self.serial:
-            logging.warning("Palette 2 serial port is already active, disconnect first")
+            gcmd.respond_info("Palette 2 serial port is already active, disconnect first")
             return
 
         logging.info("Connecting to Palette 2 on port (%s) at (%s)" %(self.serial_port, self.baud))
@@ -51,11 +65,12 @@ class Palette2:
         if self.readThread is None:
             self.readThread = threading.Thread(target=self.run_Read, args=(self.serial,))
             self.readThread.daemon = True
-            self.readThread.start()
         if self.writeThread is None:
             self.writeThread = threading.Thread(target=self.run_Write, args=(self.serial,))
             self.writeThread.daemon = True
-            self.writeThread.start()
+
+        self.readThread.start()
+        self.writeThread.start()
 
 
     cmd_Disconnect_Help = ("Disconnect from the Palette 2")
@@ -64,6 +79,24 @@ class Palette2:
         if self.serial:
             self.serial.close()
             self.serial = None
+
+    cmd_Clear_Help = ("Clear the input and output of the Palette 2")
+    def cmd_Clear(self, gcmd):
+        logging.info("Clearing Palette 2 input and output")
+        if self.serial is None:
+            gcmd.respond_info(INFO_NOT_CONNECTED)
+            return
+
+        for l in COMMAND_CLEAR:
+            self.writeQueue.put(l)
+
+    cmd_Cut_Help = ("Cut the outgoing filament")
+    def cmd_Cut(self, gcmd):
+        logging.info("Cutting outgoing filament in Palette 2")
+        if self.serial is None:
+            gcmd.respond_info(INFO_NOT_CONNECTED)
+            return
+        self.writeQueue.put(COMMAND_CUT)
 
     def run_Read(self, serial):
         while serial.is_open:
