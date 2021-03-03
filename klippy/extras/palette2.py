@@ -48,10 +48,35 @@ class Palette2:
             raise config.error("Invalid serial port specific for Palette 2")
         self.baud = config.getint("baud", default=250000)
 
-        self.readThread = None
-        self.writeThread = None
-        self.writeQueue = Queue()
+        # Omega code handlers
+        self.omega_header = [None] * 9
+        omega_handlers = ["O" + str(i) for i in range(33)]
+        for cmd in omega_handlers:
+            func = getattr(self, 'cmd_' + cmd, None)
+            desc = getattr(self, 'cmd_' + cmd + '_help', None)
+            if func:
+                self.gcode.register_command(cmd, func, desc=desc)
+            else:
+                self.gcode.register_command(cmd, self.cmd_OmegaDefault)
+
+        self._reset()
+
+        self.read_thread = None
+        self.write_thread = None
+        self.write_queue = Queue()
         self.heartbeat = None
+
+    def _reset(self):
+        self.omega_algorithms = []
+        self.omega_splices = []
+        self.omega_pings = []
+
+    def _check_P2(self, gcmd=None):
+        if self.serial:
+            return True
+        if gcmd:
+            gcmd.respond_info(INFO_NOT_CONNECTED)
+        return False
 
     cmd_Connect_Help = ("Connect to the Palette 2")
     def cmd_Connect(self, gcmd):
@@ -62,16 +87,15 @@ class Palette2:
         logging.info("Connecting to Palette 2 on port (%s) at (%s)" %(self.serial_port, self.baud))
         self.serial = serial.Serial(self.serial_port, self.baud, timeout=0.5)
 
-        if self.readThread is None:
-            self.readThread = threading.Thread(target=self.run_Read, args=(self.serial,))
-            self.readThread.daemon = True
-        if self.writeThread is None:
-            self.writeThread = threading.Thread(target=self.run_Write, args=(self.serial,))
-            self.writeThread.daemon = True
+        if self.read_thread is None:
+            self.read_thread = threading.Thread(target=self._run_Read, args=(self.serial,))
+            self.read_thread.daemon = True
+        if self.write_thread is None:
+            self.write_thread = threading.Thread(target=self._run_Write, args=(self.serial,))
+            self.write_thread.daemon = True
 
-        self.readThread.start()
-        self.writeThread.start()
-
+        self.read_thread.start()
+        self.write_thread.start()
 
     cmd_Disconnect_Help = ("Disconnect from the Palette 2")
     def cmd_Disconnect(self, gmcd=None):
@@ -83,22 +107,101 @@ class Palette2:
     cmd_Clear_Help = ("Clear the input and output of the Palette 2")
     def cmd_Clear(self, gcmd):
         logging.info("Clearing Palette 2 input and output")
-        if self.serial is None:
-            gcmd.respond_info(INFO_NOT_CONNECTED)
-            return
-
-        for l in COMMAND_CLEAR:
-            self.writeQueue.put(l)
+        if self._check_P2(gcmd):
+            for l in COMMAND_CLEAR:
+                self.write_queue.put(l)
 
     cmd_Cut_Help = ("Cut the outgoing filament")
     def cmd_Cut(self, gcmd):
         logging.info("Cutting outgoing filament in Palette 2")
-        if self.serial is None:
-            gcmd.respond_info(INFO_NOT_CONNECTED)
-            return
-        self.writeQueue.put(COMMAND_CUT)
+        if self._check_P2(gcmd):
+            self.write_queue.put(COMMAND_CUT)
 
-    def run_Read(self, serial):
+    def cmd_OmegaDefault(self, gcmd):
+        logging.debug("Omega Code: %s" %(gcmd.get_command()))
+        if self._check_P2(gcmd):
+            self.write_queue.put(gcmd.get_commandline())
+
+    cmd_O1_help = ("Initialize the print, and check connection with the Palette 2")
+    def cmd_O1(self, gcmd):
+        logging.info("Initializing print with Pallete 2")
+        if self._check_P2(gcmd):
+            startTs = time.time()
+            while self.heartbeat is None and startTs > (time.time() - HEARTBEAT_TIMEOUT):
+                time.sleep(1)
+
+            if not self.heartbeat < (time.time() - HEARTBEAT_TIMEOUT):
+                raise self.printer.command_error(INFO_NOT_CONNECTED)
+
+            self.write_queue.put(gcmd.get_commandline())
+
+    cmd_O9_help = ("Reset print information")
+    def cmd_O9(self, gcmd):
+        logging.info("Print finished, resetting Palette 2 state")
+        if self._check_P2(gcmd):
+            self.write_queue.put(gcmd.get_commandline())
+
+    def cmd_O21(self, gcmd):
+        logging.debug("Omega version: %s" %(gcmd.get_commandline()))
+        self._reset()
+        self.omega_header[0] = gcmd.get_commandline()
+
+    def cmd_O22(self, gcmd):
+        logging.debug("Omega printer profile: %s" %(gcmd.get_commandline()))
+        self.omega_header[1] = gcmd.get_commandline()
+
+    def cmd_O23(self, gcmd):
+        logging.debug("Omega slicer profile: %s" %(gcmd.get_commandline()))
+        self.omega_header[2] = gcmd.get_commandline()
+
+    def cmd_O24(self, gcmd):
+        logging.debug("Omega PPM: %s" %(gcmd.get_commandline()))
+        self.omega_header[3] = gcmd.get_commandline()
+
+    def cmd_O25(self, gcmd):
+        logging.debug("Omega inputs: %s" %(gcmd.get_commandline()))
+        self.omega_header[4] = gcmd.get_commandline()
+
+    def cmd_O26(self, gcmd):
+        logging.debug("Omega splices %s" %(gcmd.get_commandline()))
+        self.omega_header[5] = gcmd.get_commandline()
+
+    def cmd_O27(self, gcmd):
+        logging.debug("Omega pings: %s" %(gcmd.get_commandline()))
+        self.omega_header[6] = gcmd.get_commandline()
+
+    def cmd_O28(self, gcmd):
+        logging.debug("Omega MSF NA: %s" %(gcmd.get_commandline()))
+        self.omega_header[7] = gcmd.get_commandline()
+
+    def cmd_O29(self, gcmd):
+        logging.debug("Omega MSF NH: %s" %(gcmd.get_commandline()))
+        self.omega_header[8] = gcmd.get_commandline()
+
+    def cmd_O30(self, gcmd):
+        try:
+            param_drive = gcmd.get_commandline()[5:6]
+            param_distance = gcmd.get_commandline()[8:]
+            self.omega_splices.append((int(param_drive), int(param_distance)))
+            logging.debug("Omega splice command drive %s distance %s" %(param_drive, param_distance))
+        except:
+            gcmd.respond_info("Incorrectly formatted splice command")
+
+    def cmd_O31(self, gcmd):
+        param = gcmd.get_command_parameters()[4:]
+        try:
+            self.omega_pings.appen(int(param))
+            logging.debug("Omega ping command: %s" %(gcmd.get_commandline()))
+        except:
+            gcmd.respond_info("Incorrectly formatted ping command")
+
+        self.gcode.create_gcode_command("G4", "G4", {"P": "10"})
+
+    def cmd_O32(self, gcmd):
+        logging.debug("Omega algorithm: %s" %(gcmd.get_commandline()))
+        self.omega_algorithms.append(gcmd.get_commandline()[4:])
+
+    def _run_Read(self, serial):
         while serial.is_open:
             raw_line = serial.readline()
             if raw_line:
@@ -115,15 +218,15 @@ class Palette2:
                 logging.error("P2 has not responded to heartbeat, Palette will disconnect")
                 self.cmd_Disconnect()
 
-    def run_Write(self, serial):
+    def _run_Write(self, serial):
         # Tell the device we're alive
         lastHeartbeatSend = time.time()
-        self.writeQueue.put("\n")
-        self.writeQueue.put(COMMAND_HEARTBEAT)
+        self.write_queue.put("\n")
+        self.write_queue.put(COMMAND_HEARTBEAT)
         
         while serial.is_open:
             try: 
-                text_line = self.writeQueue.get(True, 0.5)
+                text_line = self.write_queue.get(True, 0.5)
                 if text_line:
                     l = text_line.strip()
                     logging.debug("%s -> P2 (%s)" %(time.time(), l))
@@ -134,11 +237,12 @@ class Palette2:
 
             # Do heartbeat routine
             if lastHeartbeatSend < (time.time() - HEARTBEAT_SEND):
-                self.writeQueue.put(COMMAND_HEARTBEAT)
+                self.write_queue.put(COMMAND_HEARTBEAT)
                 lastHeartbeatSend = time.time()
 
-        with self.writeQueue.mutex:
-            self.writeQueue.queue.clear()
+        with self.write_queue.mutex:
+            self.write_queue.queue.clear()
+        self.heartbeat = None
 
 def load_config(config):
     return Palette2(config)
