@@ -190,7 +190,7 @@ class Palette2:
     def cmd_O31(self, gcmd):
         param = gcmd.get_command_parameters()[4:]
         try:
-            self.omega_pings.appen(int(param))
+            self.omega_pings.append(int(param))
             logging.debug("Omega ping command: %s" %(gcmd.get_commandline()))
         except:
             gcmd.respond_info("Incorrectly formatted ping command")
