@@ -24,6 +24,7 @@ COMMAND_CLEAR = [
         "O10 D2 D0 D0 DFFE1",
         "O10 D3 D0 D0 DFFE1",
         "O10 D4 D0 D0 D0069"]
+COMMAND_PING = "O31"
 
 HEARTBEAT_SEND = 5
 HEARTBEAT_TIMEOUT = 11
@@ -188,14 +189,16 @@ class Palette2:
             gcmd.respond_info("Incorrectly formatted splice command")
 
     def cmd_O31(self, gcmd):
-        param = gcmd.get_command_parameters()[4:]
-        try:
-            self.omega_pings.append(int(param))
-            logging.debug("Omega ping command: %s" %(gcmd.get_commandline()))
-        except:
-            gcmd.respond_info("Incorrectly formatted ping command")
+        if self._check_P2(gcmd):
+            param = gcmd.get_command_parameters()[4:]
+            try:
+                self.omega_pings.append(int(param))
+                logging.debug("Omega ping command: %s" %(gcmd.get_commandline()))
+            except:
+                gcmd.respond_info("Incorrectly formatted ping command")
 
-        self.gcode.create_gcode_command("G4", "G4", {"P": "10"})
+            self.write_queue.put(COMMAND_PING)
+            self.gcode.create_gcode_command("G4", "G4", {"P": "10"})
 
     def cmd_O32(self, gcmd):
         logging.debug("Omega algorithm: %s" %(gcmd.get_commandline()))
