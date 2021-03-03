@@ -182,7 +182,7 @@ class Palette2:
         try:
             param_drive = gcmd.get_commandline()[5:6]
             param_distance = gcmd.get_commandline()[8:]
-            self.omega_splices.append((int(param_drive), int(param_distance)))
+            self.omega_splices.append((int(param_drive), param_distance))
             logging.debug("Omega splice command drive %s distance %s" %(param_drive, param_distance))
         except:
             gcmd.respond_info("Incorrectly formatted splice command")
