@@ -4,11 +4,6 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
-## TODO
-## - O1 command should also send a pause request, P2 will unpause once it is ready
-## - Support file listing
-## - Support smart load requests
-
 import logging
 import os
 import threading
@@ -29,6 +24,8 @@ COMMAND_CLEAR = [
         "O10 D2 D0 D0 DFFE1",
         "O10 D3 D0 D0 DFFE1",
         "O10 D4 D0 D0 D0069"]
+COMMAND_FILENAME = "O51"
+COMMAND_FILENAMES_DONE = "O52" 
 COMMAND_FIRMWARE = "O50"
 COMMAND_PING = "O31"
 
@@ -54,8 +51,10 @@ class Palette2:
         if not self.serial_port:
             raise config.error("Invalid serial port specific for Palette 2")
         self.baud = config.getint("baud", default=250000)
+        self.feedrate_splice = config.getfloat("feedrate_splice", 0.8, minval=0., maxval=1.)
+        self.feedrate_normal = config.getfloat("feedrate_normal", 1.0, minval=0., maxval=1.)
 
-        # Omega code handlers
+        # Omega code matchers
         self.omega_header = [None] * 9
         omega_handlers = ["O" + str(i) for i in range(33)]
         for cmd in omega_handlers:
@@ -73,7 +72,10 @@ class Palette2:
         self.write_queue = Queue()
         self.heartbeat = None
 
+        self.is_printing = False
+
     def _reset(self):
+        self.files = []
         self.omega_algorithms = []
         self.omega_algorithms_counter = 0
         self.omega_splices = []
@@ -84,6 +86,7 @@ class Palette2:
         self.omega_header = [None] * 9
         self.omega_header_counter = 0
         self.omega_last_command = ""
+        self.omega_drivers = []
 
     def _check_P2(self, gcmd=None):
         if self.serial:
@@ -94,9 +97,16 @@ class Palette2:
 
     cmd_Connect_Help = ("Connect to the Palette 2")
     def cmd_Connect(self, gcmd):
-        pause_check = self.printer.lookup_object("pause_resume")
-        if not pause_check:
+        try:
+            virtual_sdcard = self.printer.lookup_object("virtual_sdcard")
+        except:
+            raise self.printer.command_error("Palette 2 requires [virtual_sdcard] to work, please add it to your config!")
+
+        try:
+            pause_check = self.printer.lookup_object("pause_resume")
+        except:
             raise self.printer.command_error("Palette 2 requires [pause_resume] to work, please add it to your config!")
+
         if self.serial:
             gcmd.respond_info("Palette 2 serial port is already active, disconnect first")
             return
@@ -144,25 +154,28 @@ class Palette2:
         logging.info("Initializing print with Pallete 2")
         if self._check_P2(gcmd):
             startTs = time.time()
-            while self.heartbeat is None and startTs > (time.time() - HEARTBEAT_TIMEOUT):
+            while self.heartbeat is None and self.heartbeat < (time.time() - HEARTBEAT_TIMEOUT) and startTs > (time.time() - HEARTBEAT_TIMEOUT):
                 time.sleep(1)
 
-            if not self.heartbeat < (time.time() - HEARTBEAT_TIMEOUT):
-                raise self.printer.command_error(INFO_NOT_CONNECTED)
+            if self.heartbeat < (time.time() - HEARTBEAT_TIMEOUT):
+                raise self.printer.command_error("No response from Palette 2 when initializing")
 
             self.write_queue.put(gcmd.get_commandline())
             self.gcode.run_script("PAUSE")
+            self.gcode.respond_info("Palette 2 waiting on user to complete setup")
 
     cmd_O9_help = ("Reset print information")
     def cmd_O9(self, gcmd):
         logging.info("Print finished, resetting Palette 2 state")
         if self._check_P2(gcmd):
             self.write_queue.put(gcmd.get_commandline())
+        self.is_printing = False
 
     def cmd_O21(self, gcmd):
         logging.debug("Omega version: %s" %(gcmd.get_commandline()))
         self._reset()
         self.omega_header[0] = gcmd.get_commandline()
+        self.is_printing = True
 
     def cmd_O22(self, gcmd):
         logging.debug("Omega printer profile: %s" %(gcmd.get_commandline()))
@@ -179,6 +192,13 @@ class Palette2:
     def cmd_O25(self, gcmd):
         logging.debug("Omega inputs: %s" %(gcmd.get_commandline()))
         self.omega_header[4] = gcmd.get_commandline()
+        drives = self.omega_header[4][4:].split()
+        for idx in range(len(drives)):
+            state = drives[idx][:2]
+            if state == "D1":
+                drives[idx] = "U" + str(60 + idx)
+        self.omega_drives = [d for d in drives if d != "D0"]
+        logging.info("Omega drives: %s" %self.omega_drives)
 
     def cmd_O26(self, gcmd):
         logging.debug("Omega splices %s" %(gcmd.get_commandline()))
@@ -221,13 +241,16 @@ class Palette2:
         self.omega_algorithms.append(gcmd.get_commandline()[4:])
 
     def cmd_P2_O20(self, params):
+        if not self.is_printing:
+            return
+
         # First print, we can ignore
         if params[0] == "D5":
             logging.info("First print on Palette")
             return
 
         try:
-            n = int(params[0])
+            n = int(params[0][1:])
         except:
             logging.error("O20 command has invalid parameters")
             return
@@ -253,6 +276,9 @@ class Palette2:
             self.write_queue.put(self.omega_last_command)
 
     def cmd_P2_O34(self, params):
+        if not self.is_printing:
+            return
+
         if len(params) > 2:
             percent = float(params[1][1:])
             if params[0] == "D1":
@@ -271,17 +297,36 @@ class Palette2:
         self.gcode.run_script("RESUME")
 
     def cmd_P2_O50(self, params):
-        try:
-            fw = params[0][1:]
-            logging.info("Palette 2 firmware version %s detected" %os.fwalk)
-        except:
-            logging.error("Unable to parse firmware version")
+        if len(params) > 1:
+            try:
+                fw = params[0][1:]
+                logging.info("Palette 2 firmware version %s detected" %os.fwalk)
+            except:
+                logging.error("Unable to parse firmware version")
 
-        if fw < "9.0.9":
-            raise self.printer.command_error("Palette 2 firmware version is too old, update to at least 9.0.9")
+            if fw < "9.0.9":
+                raise self.printer.command_error("Palette 2 firmware version is too old, update to at least 9.0.9")
+        else:
+            try:
+                virtual_sdcard = self.printer.lookup_object("virtual_sdcard")
+            except:
+                pass
+
+            if virtual_sdcard:
+                self.files = [file for (file, size) in virtual_sdcard.get_file_list(check_subdirs=True) if ".mcf.gcode" in file]
+                for file in self.files:
+                    self.write_queue.put("%s D%s" %(COMMAND_FILENAME, file))
+                self.write_queue.put(COMMAND_FILENAMES_DONE)
 
     def cmd_P2_O53(self, params):
-        pass
+        if len(params) > 1 and params[0] == "D1":
+            try:
+                idx = int(params[1][1:], 16)
+                file = self.files[::-1][idx]
+                self.gcode.run_script("SDCARD_PRINT_FILE FILENAME=%s" %file)
+            except:
+                logging.error("O53 has invalid command parameters")
+
 
     def cmd_P2_O88(self, params):
         logging.error("Palette 2 error detected")
@@ -292,14 +337,49 @@ class Palette2:
             logging.error("Unable to parse Palette 2 error")
 
     def cmd_P2_O97(self, params):
-        pass
+        def printCancelling(params):
+            logging.debug("Print Cancelling")
+            self.gcode.run_script("CANCEL_PRINT")
+
+        def printCancelled(params):
+            logging.debug("Print Cancelled")
+            self.is_printing = False
+
+        def loadingOffsetStart(params):
+            logging.info("Waiting for user to load filament into printer")
+
+        def loadingOffset(params):
+            remaining = int(params[1][1:], 16)
+            logging.debug("Loading filamant remaining %d" %remaining)
+            # We could check offset and auto-start by sending "039 D1" to Palette 2
+
+        def feedrateStart(params):
+            logging.info("Setting feedrate to %f for splice" %self.feedrate_splice)
+            self.gcode.run_script("M220 S%d" %(self.feedrate_splice * 100))
+
+        def feedrateEnd(params):
+            logging.info("Setting feedrate to %f splice done" %self.feedrate_normal)
+            self.gcode.run_script("M220 S%d" %(self.feedrate_normal * 100))
+
+        matchers = [ ]
+        if self.is_printing:
+            matchers = matchers + [
+                [printCancelling, 2, "U0", "D2"],
+                [printCancelled, 2, "U0", "D3"],
+                [loadingOffsetStart, 1, "U39"],
+                [loadingOffset, 2, "U39"]
+            ]
+
+        matchers.append([feedrateStart, 2, "U25", "D0"])
+        matchers.append([feedrateEnd, 2, "U25", "D1"])
+        self._param_Matcher(matchers, params)
 
     def cmd_P2_O100(self, params):
         logging.info("Pause request from Palette 2")
         self.gcode.run_script("RESUME")
 
     def cmd_P2_0102(self, params):
-        logging.warning("Smart lod isn't supported yet")
+        logging.warning("Smart load isn't supported, ignoring command to start smart load")
 
     def cmd_P2(self, line):
         t = line.split()
@@ -313,7 +393,20 @@ class Palette2:
                 return
 
         func = getattr(self, 'cmd_P2_' + ocode, None)
-        func(params)
+        if func is not None:
+            func(params)
+
+    def _param_Matcher(self, matchers, params):
+        # Match the command with the handling table
+        for matcher in matchers:
+            if len(params) > matcher[1]:
+                match_params = matcher[2:]
+                res = all([match_params[i] == params[i] for i in range(len(match_params))])
+                if res:
+                    matcher[0](params)
+                    return True
+
+        return False
 
     def _run_Read(self, serial):
         while serial.is_open:
@@ -321,7 +414,7 @@ class Palette2:
             if raw_line:
                 # Line was return without timeout
                 text_line = raw_line.decode().strip()
-                logging.debug("%s <- P2 (%s)" %(time.time(), text_line))
+                logging.debug("%s P2 -> : %s" %(time.time(), text_line))
 
                 # Received a heartbeat from the device
                 if text_line == COMMAND_HEARTBEAT:
@@ -348,7 +441,7 @@ class Palette2:
                 if text_line:
                     self.omega_last_command = text_line
                     l = text_line.strip()
-                    logging.debug("%s -> P2 (%s)" %(time.time(), l))
+                    logging.debug("%s -> P2 : %s" %(time.time(), l))
                     terminated_line = "%s\n" %(l)
                     serial.write(terminated_line.encode())
             except Empty:
@@ -362,6 +455,7 @@ class Palette2:
         with self.write_queue.mutex:
             self.write_queue.queue.clear()
         self.heartbeat = None
+        self.is_printing = False
 
 def load_config(config):
     return Palette2(config)
