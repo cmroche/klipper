@@ -10,6 +10,8 @@ import threading
 import time
 import serial
 
+from serial import SerialException
+
 try:
    from queue import Queue, Empty
 except ImportError:
@@ -31,6 +33,7 @@ COMMAND_PING = "O31"
 
 HEARTBEAT_SEND = 5
 HEARTBEAT_TIMEOUT = 11
+SETUP_TIMEOUT = 300
 
 INFO_NOT_CONNECTED = "Palette 2 is not connected, connect first"
 
@@ -76,6 +79,7 @@ class Palette2:
 
     def _reset(self):
         self.files = []
+        self.is_setup_complete = False
         self.omega_algorithms = []
         self.omega_algorithms_counter = 0
         self.omega_splices = []
@@ -112,7 +116,11 @@ class Palette2:
             return
 
         logging.info("Connecting to Palette 2 on port (%s) at (%s)" %(self.serial_port, self.baud))
-        self.serial = serial.Serial(self.serial_port, self.baud, timeout=0.5)
+        try:
+            self.serial = serial.Serial(self.serial_port, self.baud, timeout=0.5)
+        except SerialException:
+            gcmd.respond_info("Unable to connect to the Palette 2")
+            return
 
         if self.read_thread is None:
             self.read_thread = threading.Thread(target=self._run_Read, args=(self.serial,))
@@ -161,8 +169,8 @@ class Palette2:
                 raise self.printer.command_error("No response from Palette 2 when initializing")
 
             self.write_queue.put(gcmd.get_commandline())
-            self.gcode.run_script("PAUSE")
-            self.gcode.respond_info("Palette 2 waiting on user to complete setup")
+            self.gcode.respond_info(self.gcode.respond_info("Palette 2 waiting on user to complete setup"))
+            self.gcode.run_script_from_command("PAUSE")
 
     cmd_O9_help = ("Reset print information")
     def cmd_O9(self, gcmd):
@@ -327,7 +335,6 @@ class Palette2:
             except:
                 logging.error("O53 has invalid command parameters")
 
-
     def cmd_P2_O88(self, params):
         logging.error("Palette 2 error detected")
         try:
@@ -376,6 +383,7 @@ class Palette2:
 
     def cmd_P2_O100(self, params):
         logging.info("Pause request from Palette 2")
+        self.is_setup_complete = True
         self.gcode.run_script("RESUME")
 
     def cmd_P2_0102(self, params):
