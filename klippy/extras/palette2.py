@@ -169,7 +169,7 @@ class Palette2:
                 raise self.printer.command_error("No response from Palette 2 when initializing")
 
             self.write_queue.put(gcmd.get_commandline())
-            self.gcode.respond_info(self.gcode.respond_info("Palette 2 waiting on user to complete setup"))
+            self.gcode.respond_info("Palette 2 waiting on user to complete setup")
             self.gcode.run_script_from_command("PAUSE")
 
     cmd_O9_help = ("Reset print information")
@@ -246,7 +246,7 @@ class Palette2:
 
     def cmd_O32(self, gcmd):
         logging.debug("Omega algorithm: %s" %(gcmd.get_commandline()))
-        self.omega_algorithms.append(gcmd.get_commandline()[4:])
+        self.omega_algorithms.append(gcmd.get_commandline())
 
     def cmd_P2_O20(self, params):
         if not self.is_printing:
@@ -345,11 +345,11 @@ class Palette2:
 
     def cmd_P2_O97(self, params):
         def printCancelling(params):
-            logging.debug("Print Cancelling")
+            logging.info("Print Cancelling")
             self.gcode.run_script("CANCEL_PRINT")
 
         def printCancelled(params):
-            logging.debug("Print Cancelled")
+            logging.info("Print Cancelled")
             self.is_printing = False
 
         def loadingOffsetStart(params):
@@ -373,12 +373,12 @@ class Palette2:
             matchers = matchers + [
                 [printCancelling, 2, "U0", "D2"],
                 [printCancelled, 2, "U0", "D3"],
-                [loadingOffsetStart, 1, "U39"],
-                [loadingOffset, 2, "U39"]
+                [loadingOffset, 2, "U39"],
+                [loadingOffsetStart, 1, "U39"]
             ]
 
-        matchers.append([feedrateStart, 2, "U25", "D0"])
-        matchers.append([feedrateEnd, 2, "U25", "D1"])
+        matchers.append([feedrateStart, 3, "U25", "D0"])
+        matchers.append([feedrateEnd, 3, "U25", "D1"])
         self._param_Matcher(matchers, params)
 
     def cmd_P2_O100(self, params):
@@ -407,7 +407,7 @@ class Palette2:
     def _param_Matcher(self, matchers, params):
         # Match the command with the handling table
         for matcher in matchers:
-            if len(params) > matcher[1]:
+            if len(params) >= matcher[1]:
                 match_params = matcher[2:]
                 res = all([match_params[i] == params[i] for i in range(len(match_params))])
                 if res:
