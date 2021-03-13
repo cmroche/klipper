@@ -138,6 +138,8 @@ class Palette2:
         if self.serial:
             self.serial.close()
             self.serial = None
+        self.read_thread = None
+        self.write_thread = None
 
     cmd_Clear_Help = ("Clear the input and output of the Palette 2")
     def cmd_Clear(self, gcmd):
@@ -418,7 +420,13 @@ class Palette2:
 
     def _run_Read(self, serial):
         while serial.is_open:
-            raw_line = serial.readline()
+            try:
+                raw_line = serial.readline()
+            except SerialException:
+                logging.error("Unable to communicate with the Palette 2")
+                self.cmd_Disconnect()
+                return
+
             if raw_line:
                 # Line was return without timeout
                 text_line = raw_line.decode().strip()
@@ -454,6 +462,8 @@ class Palette2:
                     serial.write(terminated_line.encode())
             except Empty:
                 pass
+            except SerialException:
+                break
 
             # Do heartbeat routine
             if lastHeartbeatSend < (time.time() - HEARTBEAT_SEND):
