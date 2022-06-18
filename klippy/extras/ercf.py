@@ -353,13 +353,13 @@ class Ercf:
             req_length = req_length - buffer_length
         else:
             iterate = False
-        if unknown_state:
+        if unknown_state :
             iterate = False
             self._counter.reset_counts()
             for i in range(num_moves):
                 self._gear_stepper_move_wait(-req_length/num_moves)
             homing_move = 1
-        if homing_move:
+        if homing_move :
             iterate = False
             for step in range( int(req_length / 15.) ):
                 self._counter.reset_counts()
